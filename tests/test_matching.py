@@ -72,7 +72,7 @@ def test_unmatched_and_strict_count():
     )
     assert result.strict_count_mismatch
     assert result.rows[0].descriptor == ""
-    assert result.rows[0].pairing_code == ""
+    assert result.rows[0].pairing_code == "00204800002"
     assert any("expected 2" in line for line in diagnostics.lines)
 
 

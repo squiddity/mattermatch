@@ -18,6 +18,27 @@ def _payload(*, pin: int, discriminator: int) -> str:
 
 
 @pytest.mark.integration
+def test_zxing_cpp_retry_preprocessing_retains_geometry_and_payload(tmp_path):
+    zxingcpp = pytest.importorskip("zxingcpp")
+    pytest.importorskip("PIL")
+    np = pytest.importorskip("numpy")
+    if not hasattr(zxingcpp, "create_barcode"):
+        pytest.skip("zxing-cpp build does not expose barcode generation")
+    from PIL import Image
+
+    text = _payload(pin=2048, discriminator=128)
+    generated = np.asarray(
+        zxingcpp.create_barcode(text, zxingcpp.BarcodeFormat.QRCode).to_image(scale=5)
+    )
+    path = tmp_path / "retry.png"
+    Image.fromarray(generated).save(path)
+    decoder = ZXingCppDecoder()
+    detections = decoder.decode_with_preprocessing(path, expected_qr_count=1)
+    assert [item.text for item in order_detections(detections)] == [text]
+    assert detections[0].position is not None
+
+
+@pytest.mark.integration
 def test_zxing_cpp_decodes_generated_qr(tmp_path):
     zxingcpp = pytest.importorskip("zxingcpp")
     pytest.importorskip("PIL")

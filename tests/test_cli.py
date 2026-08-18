@@ -46,6 +46,31 @@ def test_no_qr_still_emits_header(tmp_path):
     assert err.getvalue() == ""
 
 
+def test_namespace_words_remain_legacy_image_names(tmp_path):
+    inv = inventory(tmp_path)
+    for first_image in ("inventory", "verify-pair"):
+        out, err = io.StringIO(), io.StringIO()
+        rc = main(
+            [first_image, "--inventory", str(inv), "other.png"],
+            decoder=Fake({first_image: [], "other.png": [Detection(VALID)]}),
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == EXIT_OK
+        assert out.getvalue().count(VALID) == 1
+
+
+def test_namespace_word_before_option_and_second_image_is_scan(tmp_path):
+    out, err = io.StringIO(), io.StringIO()
+    assert main(
+        ["inventory", "--inventory", str(inventory(tmp_path)), "other.png"],
+        decoder=Fake({"inventory": [], "other.png": [Detection(VALID)]}),
+        stdout=out,
+        stderr=err,
+    ) == EXIT_OK
+    assert out.getvalue().count(VALID) == 1
+
+
 def test_recovered_rows_and_strict_count_status(tmp_path):
     destination = tmp_path / "result.csv"
     err = io.StringIO()

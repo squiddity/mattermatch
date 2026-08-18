@@ -75,9 +75,26 @@ def verhoeff_validate(digits: str) -> bool:
     return checksum == 0
 
 
+def normalize_manual_code(value: str) -> str:
+    """Normalize and validate a user-supplied Matter manual pairing code.
+
+    Spaces and hyphens are visual separators only.  The returned value is
+    never converted to an integer, so leading zeroes remain significant.
+    """
+    if not isinstance(value, str):
+        raise ValueError("pairing code must be text")
+    normalized = value.strip().replace(" ", "").replace("-", "")
+    if len(normalized) not in (11, 21) or any(char not in "0123456789" for char in normalized):
+        raise ValueError("pairing code must contain 11 or 21 ASCII digits")
+    if not verhoeff_validate(normalized):
+        raise ValueError("pairing code has an invalid Verhoeff check digit")
+    return normalized
+
+
 # Friendly aliases used by callers that refer to the algorithm by its CHIP name.
 compute_verhoeff_check_digit = verhoeff_check_digit
 validate_verhoeff = verhoeff_validate
+normalize_pairing_code = normalize_manual_code
 
 
 def base38_encode(data: bytes | bytearray | memoryview) -> str:

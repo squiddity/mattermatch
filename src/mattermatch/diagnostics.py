@@ -24,6 +24,9 @@ class Diagnostics:
     def __init__(self) -> None:
         self.lines: list[str] = []
 
+    def info(self, message: str) -> None:
+        self.lines.append(message)
+
     def warning(self, message: str) -> None:
         self.lines.append(f"warning: {message}")
 
@@ -68,3 +71,12 @@ class Diagnostics:
             f"image {image_label(filename)}: expected {expected} valid Matter QR "
             f"detections, observed {observed}"
         )
+
+    def artifact_no_geometry(self, filename: object) -> None:
+        self.warning(
+            f"image {image_label(filename)} diagnostics have no usable QR geometry; "
+            "contact sheet contains no crops"
+        )
+
+    def artifact_failure(self, filename: object) -> None:
+        self.error(f"image {image_label(filename)} diagnostic artifacts could not be written")

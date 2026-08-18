@@ -1,6 +1,7 @@
 # MatterMatch CLI Design
 
-**Status:** Design only; no implementation is included.
+**Status:** Implemented baseline and second improvement tranche; this document
+records the current CLI contract and deliberately deferred work.
 
 ## Intent
 
@@ -20,7 +21,11 @@ Recommended command shape:
 
 ```text
 mattermatch --inventory INVENTORY.csv [--output OUTPUT.csv|-]
-            [--expected-qr-count N] [--strict-count] IMAGE [IMAGE ...]
+            [--expected-qr-count N] [--strict-count]
+            [--retry-preprocessing] [--diagnostics-dir DIR] IMAGE [IMAGE ...]
+
+mattermatch verify-pair --qr MT:... --pairing-code CODE [--json]
+            [--chip-tool PATH]
 ```
 
 - `IMAGE` is one or more positional filenames. Their argument order is retained;
@@ -32,7 +37,22 @@ mattermatch --inventory INVENTORY.csv [--output OUTPUT.csv|-]
   default behavior, a mismatch only warns on stderr. `--strict-count` turns any
   mismatch into a nonzero exit status, while still emitting the recovered CSV.
   Without this option, no count warning is produced.
-- `--version` and `--help` are standard argparse options.
+- `--retry-preprocessing` is opt-in and leaves the default single decode
+  unchanged. It tries the original image, grayscale/autocontrast, contrast 1.5,
+  and sharpness 2.0 variants in that fixed order. Each variant preserves image
+  geometry and is released before the next one. A supplied expected count is
+  compared only with validated Matter payloads; retries always complete their
+  bounded variant set and the count is never used to discard detections. Retry
+  decoding caps native results at 512 per variant to bound merge/runtime cost.
+- `--diagnostics-dir DIR` is opt-in. It writes deterministic annotated and QR
+  crop-contact-sheet PNGs per input. Names contain only an input ordinal and a
+  short path hash, never QR text. Existing differing files are rejected rather
+  than overwritten. Missing geometry gets an empty contact sheet and warning;
+  artifact write failures use status 6. Artifacts are sensitive.
+- `--version` and `--help` are standard argparse options. The legacy scan
+  grammar retains an image literally named `inventory` or `verify-pair`; those
+  namespace words dispatch subcommands only when the argument shape is
+  unambiguous (a scan's `--inventory` option takes precedence).
 
 Stdout is reserved for CSV data. All diagnostics go to stderr and have stable,
 short wording. Diagnostics identify the image and detection ordinal, or a short
@@ -47,6 +67,18 @@ have exactly two fields; blank records are ignored only when they are genuinely
 empty CSV lines. `descriptor` is preserved as supplied, including an empty value
 and meaningful whitespace. CSV quoting, commas, and newlines in descriptors are
 handled by the CSV library.
+
+The backward-compatible `mattermatch inventory check PATH` command validates
+this canonical form and reports bounded row-level reasons to stderr. The
+explicit `mattermatch inventory normalize INPUT --columns code,descriptor
+[--no-header] [--pad-leading-zeroes] --output OUTPUT` command also accepts the
+explicit reversed order `descriptor,code`; `--no-header` declares a headerless
+input (a header is expected otherwise). It always writes canonical
+`code,descriptor` CSV to a different destination atomically and never changes
+the input. `--pad-leading-zeroes` is opt-in: it tries 11- and 21-digit
+leading-zero candidates, accepts exactly one Verhoeff-valid candidate, reports
+repairs, and rejects no-candidate, ambiguous, and duplicate results. Normal
+scanning does not infer columns or repair codes.
 
 Normalize each `code` before validation:
 
@@ -64,9 +96,11 @@ output or decoding images.
 
 ## Scan and payload pipeline
 
-Each image is loaded once and passed to a multi-barcode decoder. The decoder
-adapter is configured for QR codes and uses `zxingcpp.read_barcodes()`; it does
-not invoke a second directory scan or shell command.
+By default each image is loaded once and passed to a multi-barcode decoder.
+The opt-in retry path loads it once and applies bounded in-memory photometric
+variants. The decoder adapter is configured for QR codes and uses
+`zxingcpp.read_barcodes()`; it does not invoke a second directory scan or shell
+command.
 
 For each decoder result:
 
@@ -86,7 +120,8 @@ For each decoder result:
    partially accepting it.
 5. Match the canonical derived digits against the normalized inventory key using
    exact string equality. A match supplies `descriptor` and `pairing_code`; a
-   valid unmatched result supplies blank `descriptor` and blank `pairing_code`.
+   valid unmatched result supplies blank `descriptor` but still emits its
+   canonical derived `pairing_code`, together with an unmatched warning.
 
 A valid QR result is counted once for `--expected-qr-count`, even if an official
 concatenated QR yields multiple logical payload rows. Duplicate decoder results
@@ -166,9 +201,21 @@ qr_code,descriptor,pairing_code
 
 For each valid logical payload, preserve the normalized decoded QR text in
 `qr_code`. For a matched payload, write the inventory descriptor and canonical
-11- or 21-digit pairing code. For an unmatched payload, write empty descriptor
-and pairing-code fields. Every valid detection, including duplicates, produces
-its row.
+11- or 21-digit pairing code. For an unmatched payload, write an empty
+descriptor but retain the canonical 11- or 21-digit derived pairing code.
+Every valid detection, including
+duplicates, produces its row.
+
+`--format csv|jsonl` selects output (default `csv`). CSV remains byte-for-byte
+the three-column contract above. JSONL emits one object per valid logical
+payload, in deterministic image/detection/chunk order, with stable fields
+`source_image`, `detection_ordinal`, `bounding_box` (an axis-aligned
+`[min_x,min_y,max_x,max_y]` when geometry is available, otherwise `null`),
+`qr_code` (the complete decoded text, including harmless surrounding
+whitespace), `pairing_code`, `descriptor`, and `status` (`matched` or
+`unmatched`). JSONL output is also atomic for file destinations and diagnostics
+never contain payloads or pairing codes. A `*`-concatenated QR emits multiple
+objects sharing source and detection metadata.
 
 Use Python's CSV writer with UTF-8 and `newline=""`; quote fields as required.
 When `--output -` is selected, write only CSV to stdout. For a file output, write
@@ -202,14 +249,67 @@ Suggested exit statuses:
 | 3 | Output cannot be created/written/replaced |
 | 4 | One or more image inputs could not be read/decoded (recovered rows may exist) |
 | 5 | `--strict-count` mismatch (CSV was emitted) |
+| 6 | requested visual diagnostic artifact could not be written |
+| 7 | `verify-pair` semantic failure (invalid/mismatched/ambiguous input) |
 
 Warnings for non-Matter QR codes, malformed QR codes, unmatched valid codes,
 duplicates, and non-strict count mismatches do not change the status. If several
 recoverable statuses occur, use the highest-priority status in the order
-`output (3)`, image failure (4), strict mismatch (5), while inventory/usage
-errors fail before scanning; document and test the precedence explicitly. A
-future implementation may use a named status enum internally, but the shell
-contract must remain stable.
+`output (3)`, artifact failure (6), image failure (4), strict mismatch (5),
+while inventory/usage errors fail before scanning. A future implementation may
+use a named status enum internally, but the shell contract must remain stable.
+Reconciliation/coverage merge commands, per-image expected-count overrides, and
+ZIP/archive/directory input are intentionally deferred and are not part of this
+tranche.
+
+## Semantic verification
+
+`mattermatch verify-pair --qr MT:... --pairing-code CODE` is a separate command
+so it does not disturb the historical inventory scan grammar. It parses every
+`*` chunk with the same strict Matter parser, removes only visual spaces and
+hyphens from the supplied code, requires exactly 11 or 21 ASCII digits, and
+checks Verhoeff before comparing protocol-canonical digits as strings. Human
+output reports setup PIN, long discriminator, derived short discriminator,
+commissioning flow, expected length, and PASS/FAIL without echoing payloads or
+codes. `--json` emits the same bounded fields and a stable `result` value.
+
+A single manual code cannot identify multiple concatenated logical payloads, so
+`verify-pair` fully validates all chunks and then returns status 7 with an
+ambiguous-concatenation result. Normal scan mode intentionally retains all
+logical chunks. Status 0 is a match; status 7 covers semantic mismatch,
+malformed QR/code, and failed optional cross-check; status 2 is CLI usage.
+`--chip-tool PATH` invokes `[PATH, "payload", "parse-setup-payload", QR]` and
+`[PATH, "payload", "parse-setup-payload", CODE]` independently, without a
+shell. Each has a five-second timeout and combined stdout/stderr is bounded at
+64 KiB while running. QR passcode/long-discriminator and manual
+passcode/short-discriminator fields (plus vendor/product for non-standard flow)
+are checked against the local parser and their protocol relationship. Output is
+read live with bounded reader threads; POSIX runs use a new process group/session
+and terminate the group on timeout or overflow. Platforms without group-kill
+support use a bounded direct-process fallback and may not reclaim a descendant
+that deliberately escapes the group. The tool is never downloaded or built.
+
+## Recovery and visual diagnostics
+
+Retry preprocessing is deliberately photometric only: no resize, crop, rotate,
+or threshold geometry changes are introduced. Four fixed attempts (original,
+grayscale/autocontrast, contrast, sharpness) bound runtime and memory. Results
+are merged across attempts only when normalized text and overlapping/near-
+identical boxes agree; geometry-less results are not merged, and same-text QR
+symbols at separate positions remain separate. Native images are loaded once
+with existing pixel/dimension limits. This helps modest contrast/lighting
+problems, not severe glare, blur, or occlusion.
+
+Diagnostic output is opt-in because it contains source image material. Each
+input writes an ordinal/path-hash annotated image and contact sheet. Boxes are
+clamped to image bounds, crops and sheet dimensions are capped, and labels use
+detection ordinals rather than payload text. Annotated detections are capped as
+well. A deterministic existing artifact with identical bytes is reused; a
+differing existing file causes a clear status-6 failure instead of silent
+replacement, and concurrent installation uses atomic no-replace creation.
+Directory/archive input,
+per-image expected-count overrides, and reconciliation/coverage merge commands
+remain explicitly deferred.
 
 ## Architecture
 
@@ -222,7 +322,9 @@ src/mattermatch/
   __main__.py          # python -m mattermatch
   cli.py               # argparse, orchestration, exit mapping
   inventory.py         # CSV loading, code normalization, duplicate checks
-  decoder.py           # BarcodeDecoder protocol and ZXing-C++ adapter
+  decoder.py           # BarcodeDecoder protocol, ZXing-C++ adapter, retry variants
+  artifacts.py         # Opt-in bounded annotated images/contact sheets
+  verification.py      # Semantic QR/manual-code and optional chip-tool check
   matter.py             # Base38, packed fields, TLV, Verhoeff, parser model
   matching.py           # ordered detections and inventory joins
   diagnostics.py        # stderr warning/error formatting and fingerprints
@@ -312,6 +414,12 @@ Tests should be thorough at the pure-function and CLI-contract levels:
 - A small real `zxing-cpp` integration fixture containing multiple QR codes,
   plus a platform-independent fake-decoder suite so CI is not wholly dependent
   on native image behavior.
+- `verify-pair` golden/mismatch tests cover standard and 21-digit leading-zero
+  values, JSON/status output, atomic concatenated-payload rejection, and the
+  optional tool boundary.
+- Retry tests cover variant merging with repeated text at distinct positions,
+  native preprocessing, expected-count hints, and deterministic diagnostic
+  artifacts/collision handling.
 
 Done means the implementation can be run repeatedly on unchanged inputs and
 produce byte-for-byte identical CSV and deterministic diagnostics (apart from
