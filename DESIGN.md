@@ -1,7 +1,9 @@
 # MatterMatch CLI Design
 
 **Status:** Implemented baseline and second improvement tranche; this document
-records the current CLI contract and deliberately deferred work.
+records the current CLI contract and deliberately deferred work. It is not a
+release acceptance report: the [pause/resume handoff](docs/HANDOFF.md) lists
+v0.2.1 fixes, remaining implementation gaps, and local validation evidence.
 
 ## Intent
 
@@ -33,6 +35,11 @@ mattermatch verify-pair --qr MT:... --pairing-code CODE [--json]
   directory.
 - `--inventory PATH` is required.
 - `--output PATH` defaults to `-` (stdout); `-` explicitly means stdout.
+  Before decoding/artifacts, reject scan output aliasing the inventory or any
+  image (including resolved paths, symlinks, and existing hard links) with status
+  2. Unverifiable paths fail closed with status 3. This does not protect against
+  shell redirection truncating an input before startup or hostile concurrent
+  filesystem mutation.
 - `--expected-qr-count N` is an optional per-image hint (`N >= 0`). With the
   default behavior, a mismatch only warns on stderr. `--strict-count` turns any
   mismatch into a nonzero exit status, while still emitting the recovered CSV.
@@ -283,7 +290,10 @@ malformed QR/code, and failed optional cross-check; status 2 is CLI usage.
 shell. Each has a five-second timeout and combined stdout/stderr is bounded at
 64 KiB while running. QR passcode/long-discriminator and manual
 passcode/short-discriminator fields (plus vendor/product for non-standard flow)
-are checked against the local parser and their protocol relationship. Output is
+are checked against the local parser and their protocol relationship. QR commissioning flow retains 0/1/2; a manual
+code represents only standard (0) or nonstandard, which CHIP parses as Custom
+(2). Compare tool flow fields against each representation rather than requiring
+manual flow to equal the original QR flow. Output is
 read live with bounded reader threads; POSIX runs use a new process group/session
 and terminate the group on timeout or overflow. Platforms without group-kill
 support use a bounded direct-process fallback and may not reclaim a descendant
@@ -294,8 +304,10 @@ that deliberately escapes the group. The tool is never downloaded or built.
 Retry preprocessing is deliberately photometric only: no resize, crop, rotate,
 or threshold geometry changes are introduced. Four fixed attempts (original,
 grayscale/autocontrast, contrast, sharpness) bound runtime and memory. Results
-are merged across attempts only when normalized text and overlapping/near-
-identical boxes agree; geometry-less results are not merged, and same-text QR
+are merged across attempts only when normalized text agrees, at least half of
+each bounding box overlaps, and centers/dimensions agree within the fixed
+jitter tolerances. Incidental overlap of rotated-symbol boxes is insufficient.
+Geometry-less results are not merged, and same-text QR
 symbols at separate positions remain separate. Native images are loaded once
 with existing pixel/dimension limits. This helps modest contrast/lighting
 problems, not severe glare, blur, or occlusion.
@@ -313,7 +325,7 @@ remain explicitly deferred.
 
 ## Architecture
 
-Proposed source layout:
+Source layout (the `tests/fixtures/` directory below is planned, not yet present):
 
 ```text
 pyproject.toml

@@ -222,6 +222,31 @@ def _has_inventory_option(argv: Sequence[str]) -> bool:
     return any(value == "--inventory" or value.startswith("--inventory=") for value in argv)
 
 
+def _scan_output_aliases_input(output: str, inputs: Sequence[str]) -> bool:
+    """Reject both path aliases and existing hard links before scan side effects.
+
+    Atomic replacement does not protect an input chosen as the output path.
+    Missing inputs remain recoverable image errors; other comparison errors
+    propagate so that an unverifiable destination is never written.
+    """
+    if output == "-":
+        return False
+    target = Path(output)
+    resolved_target = target.resolve()
+    for source in inputs:
+        path = Path(source)
+        if resolved_target == path.resolve():
+            return True
+        try:
+            if target.samefile(path):
+                return True
+        except FileNotFoundError:
+            # A distinct new destination or missing image cannot alias an
+            # existing file by inode; resolved path equality was checked above.
+            continue
+    return False
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -263,6 +288,17 @@ def main(
         inventory = load_inventory(args.inventory)
     except InventoryError:
         diagnostics.error(f"inventory {image_label(args.inventory)} is invalid or unreadable")
+        diagnostics.write(err)
+        return EXIT_USAGE_OR_INVENTORY
+
+    try:
+        collision = _scan_output_aliases_input(args.output, [args.inventory, *args.images])
+    except (OSError, RuntimeError, ValueError):
+        diagnostics.error("output and input paths could not be compared safely")
+        diagnostics.write(err)
+        return EXIT_OUTPUT
+    if collision:
+        diagnostics.error("scan output must be different from the inventory and every input image")
         diagnostics.write(err)
         return EXIT_USAGE_OR_INVENTORY
 

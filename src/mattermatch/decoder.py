@@ -121,15 +121,18 @@ def _boxes_related(
     bx1, by1, bx2, by2 = second
     aw, ah = max(0.0, ax2 - ax1), max(0.0, ay2 - ay1)
     bw, bh = max(0.0, bx2 - bx1), max(0.0, by2 - by1)
-    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
-    if ix > 0 and iy > 0:
-        return True
-    # Preprocessing should not change geometry, but native bindings can move a
-    # corner by a few pixels.  Only near-identical centers and dimensions are
-    # accepted when boxes do not overlap; adjacent physical QRs must remain.
     if not aw or not ah or not bw or not bh:
         return False
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
+    # Distinct rotated QRs can have overlapping axis-aligned boxes.  Require
+    # at least half of EACH box to overlap, not merely a shared corner or
+    # containment of a much smaller box.  Even tiny boxes must agree spatially.
+    if ix * iy < 0.5 * max(aw * ah, bw * bh):
+        return False
+    # Photometric retries do not change geometry, but native bindings can move
+    # corners by a few pixels.  Overlap alone is insufficient: centers and
+    # dimensions must also agree before discarding a same-text detection.
     center_distance_x = abs((ax1 + ax2) - (bx1 + bx2)) / 2
     center_distance_y = abs((ay1 + ay2) - (by1 + by2)) / 2
     return (

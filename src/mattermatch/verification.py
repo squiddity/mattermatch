@@ -375,10 +375,16 @@ def chip_tool_cross_check(
     if manual_fields["short_discriminator"] != ((qr_fields["discriminator"] >> 8) & 0xF):
         return "fail", "chip-tool discriminator relationship disagreed"
 
-    # Flow is not printed by every chip-tool release, but when present it must
-    # agree with the local parser in both independently parsed representations.
-    for fields in (qr_fields, manual_fields):
-        if fields["commissioning_flow"] is not None and fields["commissioning_flow"] != payload.commissioning_flow:
+    # QR preserves all three flows, but manual codes encode only standard vs
+    # nonstandard (the VID/PID-present bit). CHIP parses either nonstandard
+    # flow as Custom (2), including a QR with UserActionRequired (1).
+    # Flow is not printed by every chip-tool release; check it when present.
+    manual_flow = 0 if payload.commissioning_flow == 0 else 2
+    for fields, expected_flow in (
+        (qr_fields, payload.commissioning_flow),
+        (manual_fields, manual_flow),
+    ):
+        if fields["commissioning_flow"] is not None and fields["commissioning_flow"] != expected_flow:
             return "fail", "chip-tool commissioning flow disagreed"
     if payload.commissioning_flow != 0:
         for fields in (qr_fields, manual_fields):
